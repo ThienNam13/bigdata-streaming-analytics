@@ -1,0 +1,13 @@
+# Bỏ qua thư mục venv
+venv/
+.venv/
+
+# Bỏ qua file tạm
+__pycache__/
+*.pyc
+*.log
+
+# Bỏ qua dữ liệu lớn
+data/
+*.csv
+*.parquet

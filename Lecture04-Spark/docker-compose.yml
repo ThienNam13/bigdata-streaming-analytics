@@ -1,0 +1,33 @@
+services:
+  spark-master:
+    image: apache/spark:3.5.6
+    container_name: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    environment:
+      - PYSPARK_PYTHON=python3
+    volumes:
+      - D:\Bigdata:/app
+    networks:
+      - hadoop-network
+
+  spark-worker:
+    image: apache/spark:3.5.6
+    container_name: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - PYSPARK_PYTHON=python3
+    networks:
+      - hadoop-network
+
+networks:
+  hadoop-network:
+    name: lecture03-hadoop_default
+    external: true
