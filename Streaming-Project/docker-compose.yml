@@ -51,6 +51,8 @@ services:
       - PYSPARK_PYTHON=python3
     networks:
       - streaming-bigdata-network
+    volumes:
+    - ./logs:/opt/logs
 
   spark-worker-1:
     image: apache/spark:3.5.6
