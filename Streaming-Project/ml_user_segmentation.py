@@ -10,17 +10,29 @@ from pyspark.sql import functions as F
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.evaluation import ClusteringEvaluator
+from logging.handlers import RotatingFileHandler
 import logging
 import sys
-
-# ============================================================
+import os
 # 1. CẤU HÌNH HỆ THỐNG & LOGGING
-# ============================================================
+LOG_DIR = "/opt/spark/logs"
 
-# Thiết lập Log để theo dõi tiến trình chạy của Pipeline trong Terminal
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except FileExistsError:
+    # Nếu Docker báo lỗi "File exists" giả lập do cơ chế Mount, bỏ qua một cách an toàn
+    pass
+
+LOG_FILE_PATH = os.path.join(LOG_DIR, "ml_segmentation.log")
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        # Giới hạn dung lượng file log tối đa 20MB, lưu tối đa 5 file backup
+        RotatingFileHandler(LOG_FILE_PATH, maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger("SPARK_ML")
 
@@ -32,27 +44,26 @@ WAREHOUSE_PATH = f"{HDFS_ROOT}/user/hadoop/warehouse"
 MONGO_URI = "mongodb://admin:secret@mongodb:27017"
 DATABASE = "streaming_analytics"
 
-# ============================================================
+# UTILS: HÀM TRÍCH XUẤT BẢNG SPARK THÀNH CHUỖI ĐỂ GHI LOG
+def get_show_string(df, n=5):
+    """Chuyển đổi n dòng của DataFrame thành chuỗi ký tự dạng bảng sạch để ghi vào log file"""
+    try:
+        return df._jdf.showString(n, 25, False)
+    except Exception:
+        return "Không thể hiển thị mẫu dữ liệu."
+    
 # 2. KHỞI TẠO SPARK SESSION
-# ============================================================
 
 def create_spark_session():
-    """
-    Khởi tạo và cấu hình Spark Session tích hợp sẵn trình ghi dữ liệu MongoDB Connector.
-    """
     logger.info("Đang khởi tạo Spark Session...")
-
     spark = (
         SparkSession.builder
         .appName("VideoStreaming-ML-Pipeline")
-        # Cấu hình URI và Tên Database mặc định cho MongoDB Connector
         .config("spark.mongodb.write.connection.uri", MONGO_URI)
         .config("spark.mongodb.write.database", DATABASE)
-        # Bật tính năng tối ưu hóa thực thi truy vấn thích ứng (AQE) của Spark SQL
         .config("spark.sql.adaptive.enabled", "true")
         .getOrCreate()
     )
-
     # Ẩn bớt các Log INFO không cần thiết của Spark, chỉ hiện cảnh báo (WARN) và lỗi (ERROR)
     spark.sparkContext.setLogLevel("WARN")
     return spark
@@ -63,16 +74,13 @@ def create_spark_session():
 # ============================================================
 
 def extract_user_features(spark):
-    """
-    Đọc dữ liệu từ HDFS Data Warehouse, thực hiện gom nhóm SQL để tạo các chỉ số hành vi
-    """
     logger.info("Bắt đầu bước Feature Engineering...")
 
     # Đọc bảng Sự kiện (Fact) và bảng Lịch (Dimension) từ định dạng Parquet trên HDFS
     fact_watch = spark.read.parquet(f"{WAREHOUSE_PATH}/fact_watch_history")
     dim_date = spark.read.parquet(f"{WAREHOUSE_PATH}/dim_date")
 
-    # Đăng ký thành các bảng ảo để viết truy vấn bằng cú pháp SQL thuần túy
+    # Đăng ký thành các bảng ảo để viết truy vấn bằng cú pháp SQL thuần
     fact_watch.createOrReplaceTempView("fact_watch")
     dim_date.createOrReplaceTempView("dim_date")
 
@@ -80,29 +88,16 @@ def extract_user_features(spark):
     query = """
         SELECT
             f.user_id,
-            -- 1. Tổng số lượt bấm xem phim
             COUNT(f.session_id) * 1.0 AS total_views,
-            
-            -- 2. Tổng thời lượng xem (tính bằng phút)
             SUM(f.watch_duration_minutes) * 1.0 AS total_duration_minutes,
-            
-            -- 3. Tiến trình xem trung bình (User thường xem hết phim hay hay tắt giữa chừng)
             AVG(f.progress_percentage) AS avg_progress_percentage,
-            
-            -- 4. Tỷ lệ xem phim vào ban đêm (từ 22h đêm - 4h sáng hôm sau)
             SUM(CASE WHEN d.is_night = true THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS night_view_ratio
-
         FROM fact_watch f
         JOIN dim_date d ON f.date_key = d.date_key
         GROUP BY f.user_id
-        
     """
 
-    df = spark.sql(query)
-
-    # Điền giá trị 0.0 vào các ô dữ liệu trống (Null) nếu có để tránh lỗi thuật toán toán học
-    df = df.na.fill(0.0)
-
+    df = spark.sql(query).na.fill(0.0)
     logger.info(f"Tổng số lượng người dùng đủ điều kiện đưa vào phân cụm: {df.count()}")
     return df
 
@@ -112,10 +107,6 @@ def extract_user_features(spark):
 # ============================================================
 
 def find_optimal_k(scaled_df, max_k=8):
-    """
-    Hàm bổ trợ quét qua các giá trị K từ 2 đến max_k để tính toán điểm Silhouette Score.
-    Giúp chứng minh khoa học lý do tại sao chọn K=3 trong báo cáo bài tập lớn.
-    """
     evaluator = ClusteringEvaluator(
         featuresCol="features",
         predictionCol="prediction",
@@ -123,9 +114,8 @@ def find_optimal_k(scaled_df, max_k=8):
     )
 
     logger.info("========== TIẾN TRÌNH KHẢO SÁT CHỈ SỐ K TỐI ƯU ==========")
-
+    
     for k in range(2, max_k + 1):
-        # Huấn luyện nhanh mô hình KMeans với số cụm k
         model = KMeans(
             featuresCol="features",
             predictionCol="prediction",
@@ -133,38 +123,25 @@ def find_optimal_k(scaled_df, max_k=8):
             seed=44
         ).fit(scaled_df)
 
-        # Dự đoán phân cụm thử nghiệm
         prediction = model.transform(scaled_df)
-
-        # In kết quả khảo sát ra Terminal
-        # - Cost: Tổng bình phương khoảng cách tới tâm (Càng nhỏ càng tốt)
-        # - Silhouette: Độ tách biệt giữa các cụm (Càng gần 1.0 càng hoàn hảo)
         logger.info(
             f"Thử nghiệm K={k} | "
             f"Cost (Inertia)={model.summary.trainingCost:.2f} | "
             f"Silhouette Score={evaluator.evaluate(prediction):.4f}"
         )
-
-
 # ============================================================
 # 5. HUẤN LUYỆN KMEANS & GÁN NHÃN ĐỘNG (DYNAMIC LABELING)
 # ============================================================
 
 def build_and_run_kmeans(features_df):
-    """
-    Chuẩn hóa dữ liệu, thực hiện phân cụm bằng KMeans, tự động phân tích tâm cụm thực tế 
-    để gán nhãn nghiệp vụ một cách linh hoạt, chống lỗi hoán đổi nhãn khi chạy lại pipeline.
-    """
+    logger.info("-" * 60)
     logger.info("Đang gom nhóm các trường đặc trưng thành Vector...")
     feature_cols = ["total_views", "total_duration_minutes", "avg_progress_percentage", "night_view_ratio"]
 
-    # Gom các cột đặc trưng riêng lẻ thành một cột Vector duy nhất mang tên 'raw_features'
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="raw_features")
     assembled = assembler.transform(features_df)
 
     logger.info("Đang tiến hành chuẩn hóa dữ liệu (StandardScaler)...")
-    # SỬA ĐỔI TOÁN HỌC: Bật both withStd=True và withMean=True nhằm đưa dữ liệu về phân phối chuẩn tâm 0.
-    # Tránh việc cột có giá trị lớn (thời lượng xem) áp đảo các cột có giá trị nhỏ (tỷ lệ xem đêm).
     scaler = StandardScaler(
         inputCol="raw_features",
         outputCol="features",
@@ -173,9 +150,10 @@ def build_and_run_kmeans(features_df):
     )
     scaled = scaler.fit(assembled).transform(assembled)
 
-    # Chạy hàm khảo sát tìm K tối ưu để ghi log theo dõi (Phục vụ phân tích tài liệu bài tập lớn)
+    # Chạy hàm khảo sát tìm K tối ưu
     find_optimal_k(scaled)
 
+    logger.info("-" * 60)
     logger.info("Đang chạy thuật toán huấn luyện KMeans chính thức với K=3...")
     kmeans = KMeans(
         featuresCol="features",
@@ -185,27 +163,33 @@ def build_and_run_kmeans(features_df):
     )
     model = kmeans.fit(scaled)
     predictions = model.transform(scaled)
+    predictions.cache()
 
-    logger.info("Báo cáo sơ bộ số lượng phần tử phân bổ trong mỗi mã cụm:")
-    predictions.groupBy("cluster_id").count().show()
+    # ghi log số lượng phần tử phân bổ cụm qua hàm bổ trợ
+    logger.info("[ML Metrics] Báo cáo số lượng phần tử phân bổ trong mỗi mã cụm:")
+    cluster_counts = predictions.groupBy("cluster_id").count().sort("cluster_id")
+    logger.info(f"\n{get_show_string(cluster_counts, 5)}")
 
     # --------------------------------------------------------
-    # BƯỚC ĐẮC ĐỊA: TÍNH TÂM CỤM TRÊN DỮ LIỆU GỐC (GIẢI MÃ TÂM CỤM)
+    # TÍNH TÂM CỤM TRÊN DỮ LIỆU GỐC (GIẢI MÃ TÂM CỤM)
     # --------------------------------------------------------
-    # Giải pháp tính trung bình hình học trực tiếp từ dữ liệu chưa scale giúp Dashboard hiển thị
-    # đúng con số thực tế (phút, phần trăm, lượt xem) thay vì các con số Z-score vô nghĩa.
     centers = (
         predictions
         .groupBy("cluster_id")
         .agg(
-            F.avg("total_views").alias("total_views_center"),
-            F.avg("total_duration_minutes").alias("duration_center"),
-            F.avg("avg_progress_percentage").alias("progress_center"),
-            F.avg("night_view_ratio").alias("night_ratio_center")
+            F.round(F.avg("total_views"), 2).alias("total_views_center"),
+            F.round(F.avg("total_duration_minutes"), 2).alias("duration_center"),
+            F.round(F.avg("avg_progress_percentage"), 2).alias("progress_center"),
+            F.round(F.avg("night_view_ratio"), 4).alias("night_ratio_center")
         )
+        .sort("cluster_id")
     )
+    centers.cache()
 
-    # Lưu thông tin tọa độ tâm cụm thực tế này xuống MongoDB làm metadata tham chiếu nếu cần
+    logger.info("[ML Metrics] Tọa độ tâm cụm thực tế (Phục vụ phân tích hệ thống):")
+    logger.info(f"\n{get_show_string(centers, 5)}")
+
+    # Lưu thông tin tọa độ tâm cụm thực tế này xuống MongoDB làm metadata tham chiếu
     centers.write \
         .format("mongodb") \
         .option("collection", "ml_cluster_centroids") \
@@ -213,10 +197,11 @@ def build_and_run_kmeans(features_df):
         .save()
 
     # --------------------------------------------------------
-    # KIẾN TRÚC CHUẨN: GÁN NHÃN ĐỘNG NGAY TẠI TẦNG SPARK
+    # KIẾN TRÚC GÁN NHÃN ĐỘNG TẠI TẦNG SPARK
     # --------------------------------------------------------
     # Đưa tập tâm cụm rất nhỏ (3 dòng) về Driver dưới dạng mảng Python để xử lý logic gán nhãn chữ
     center_list = centers.collect()
+    centers.unpersist()
 
     # Định danh cụm "Cú đêm": Cụm nào có giá trị trung bình tỉ lệ xem đêm lớn nhất
     night_cluster = max(
@@ -243,7 +228,7 @@ def build_and_run_kmeans(features_df):
             .otherwise("Xem giải trí")
         )
     )
-
+    predictions.unpersist()
     return labeled
 
 
@@ -252,14 +237,9 @@ def build_and_run_kmeans(features_df):
 # ============================================================
 
 def save_segments_to_mongodb(df):
-    """
-    Ép kiểu dữ liệu an toàn, xử lý triệt để lỗi đổi tên CAST của Spark bằng hàm .alias(),
-    sau đó ghi đè dữ liệu hồ sơ khách hàng hoàn chỉnh xuống MongoDB.
-    """
-    logger.info("Đang chuẩn bị xuất dữ liệu phân cụm hoàn chỉnh sang MongoDB...")
+    logger.info("-" * 60)
+    logger.info("Đang xuất dữ liệu phân cụm hoàn chỉnh sang MongoDB...")
 
-    # GIẢI PHÁP FIX LỖI DASHBOARD: Sử dụng .alias() rõ ràng cho từng cột sau khi .cast("double").
-    # Giúp bảo toàn tên gốc của trường dữ liệu, Streamlit Dashboard đọc lên không bị dính lỗi Crash.
     final_df = (
         df.select(
             "user_id",
@@ -271,49 +251,52 @@ def save_segments_to_mongodb(df):
             "segment_name"
         )
     )
+    final_df.cache()
 
-    # Ghi dữ liệu xuống collection 'ml_user_segments' trong MongoDB dưới chế độ 'overwrite' (ghi đè mới)
+    # In mẫu 5 hồ sơ khách hàng đã được phân cụm hoàn chỉnh vào log
+    logger.info("[ML Metrics] Mẫu hồ sơ phân cụm người dùng thực tế chuẩn bị xuất xưởng:")
+    logger.info(f"\n{get_show_string(final_df, 5)}")
+
+    # Ghi dữ liệu xuống collection 'ml_user_segments' trong MongoDB
     final_df.write \
         .format("mongodb") \
         .option("collection", "ml_user_segments") \
         .mode("overwrite") \
         .save()
 
-    logger.info("🏆 Đã xuất toàn bộ hồ sơ phân cụm người dùng xuống MongoDB thành công!")
+    logger.info("Đã xuất toàn bộ hồ sơ phân cụm người dùng xuống MongoDB")
 
 
 # ============================================================
 # 7. HÀM ĐIỀU PHỐI CHÍNH (MAIN FUNCTION)
 # ============================================================
-
 def main():
-    # Khởi tạo môi trường tính toán Spark
     spark = create_spark_session()
 
     try:
-        logger.info("===== KÍCH HOẠT PIPELINE MÁY HỌC PHÂN CỤM USER =====")
+        logger.info("=" * 60)
+        logger.info("===== KÍCH HOẠT PIPELINE MÁY HỌC PHÂN CỤM USER=====")
+        logger.info("=" * 60)
         
-        # Bước 1: Trích xuất và dọn dẹp biến số đặc trưng hành vi
+        # Feature Engineering
         features = extract_user_features(spark)
         
-        # Bước 2: Chuẩn hóa, chạy KMeans và tự động dán nhãn nghiệp vụ thông minh
+        # Huấn luyện KMeans & Dán nhãn
         result = build_and_run_kmeans(features)
         
-        # Bước 3: Lưu trữ kết quả đầu ra sạch sẽ phục vụ hiển thị Dashboard
+        # Xuất dữ liệu sang MongoDB
         save_segments_to_mongodb(result)
         
-        logger.info("===== KẾT THÚC PIPELINE: THÀNH CÔNG RỰC RỠ =====")
+        logger.info("=" * 60)
+        logger.info("===== KẾT THÚC PIPELINE MÁY HỌC =====")
+        logger.info("=" * 60)
 
     except Exception as e:
-        # Bắt toàn bộ các lỗi phát sinh (thiếu file, lỗi kết nối DB, sai cú pháp) để ghi log hệ thống
-        logger.error(f"❌ Pipeline gặp sự cố nghiêm trọng: {e}")
+        logger.error(f"Pipeline lỗi: {e}")
         sys.exit(1)
-
     finally:
-        # Đảm bảo tắt Spark Session giải phóng tài nguyên RAM/CPU cho Cluster dù pipeline thành công hay thất bại
         spark.stop()
-        logger.info("Đã đóng kết nối giải phóng tài nguyên Spark.")
-
+        logger.info("Đã đóng kết nối")
 
 if __name__ == "__main__":
     main()

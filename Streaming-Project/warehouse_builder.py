@@ -22,16 +22,28 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.types import *
 from pyspark.sql.functions import to_date
+from logging.handlers import RotatingFileHandler
 import logging
 import sys
-
+import os
 # ============================================================
 # LOGGING
 # ============================================================
-
+LOG_DIR = "/opt/spark/logs"
+# os.makedirs(LOG_DIR, exist_ok=True)
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except FileExistsError:
+    # Nếu Docker báo lỗi "File exists" giả lập do cơ chế Mount, bỏ qua một cách an toàn
+    pass
+LOG_FILE_PATH = os.path.join(LOG_DIR, "warehouse_builder.log")
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        RotatingFileHandler(LOG_FILE_PATH, maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger("WAREHOUSE")
 
@@ -53,8 +65,8 @@ DIM_DATE_PATH = f"{WAREHOUSE_PATH}/dim_date"
 # LOCAL SOURCE FILES
 # ============================================================
 
-USERS_CSV = "/opt/spark/users.csv"
-MOVIES_CSV = "/opt/spark/movies.csv"
+USERS_CSV = "/opt/spark/apps/users.csv"
+MOVIES_CSV = "/opt/spark/apps/movies.csv"
 
 # ============================================================
 # CREATE SPARK SESSION

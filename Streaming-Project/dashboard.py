@@ -9,6 +9,7 @@ import streamlit as st
 import pandas as pd
 import pymongo
 import plotly.express as px
+from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # 1. CẤU HÌNH TRANG GIAO DIỆN (PAGE CONFIG)
@@ -18,6 +19,8 @@ st.set_page_config(
     page_icon="🎬",
     layout="wide"
 )
+# Tự động refresh mỗi 15 giây
+st_autorefresh(interval=15 * 1000, key="data_refresh")
 
 # Cấu hình kết nối cơ sở dữ liệu MongoDB Serving Layer
 MONGO_URI = "mongodb://admin:secret@localhost:27017"
@@ -26,7 +29,7 @@ DATABASE = "streaming_analytics"
 # ============================================================
 # 2. HÀM ĐỌC DỮ LIỆU ĐA NĂNG TỪ CÁC COLLECTION (HAVE CACHING)
 # ============================================================
-@st.cache_data(ttl=15)  # Bộ nhớ đệm 15 giây để cập nhật nhanh dữ liệu Streaming
+@st.cache_data(ttl=14)  # Bộ nhớ đệm 14 giây để cập nhật nhanh dữ liệu Streaming
 def load_collection_data(collection_name):
     """
     Hàm tổng quát kết nối vào MongoDB và lấy dữ liệu của một Collection cụ thể chuyển thành DataFrame
@@ -144,7 +147,9 @@ with tab2:
         df_peak = load_collection_data("report_peak_hours")
         if not df_peak.empty:
             cols = df_peak.columns.tolist()
+            df_peak = df_peak.sort_values(by=cols[0])
             fig_peak = px.line(df_peak, x=cols[0], y=cols[1], markers=True, title="Lượt truy cập theo giờ")
+            fig_peak.update_layout(xaxis=dict(tickmode='linear', dtick=1))
             st.plotly_chart(fig_peak, use_container_width=True)
         else:
             st.info("💡 Chưa có dữ liệu thống kê khung giờ cao điểm.")

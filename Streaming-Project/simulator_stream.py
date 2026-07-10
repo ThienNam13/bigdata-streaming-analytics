@@ -32,7 +32,7 @@ try:
 except FileNotFoundError as e:
     print(f" Lỗi: Không tìm thấy file dữ liệu CSV mẫu. Vui lòng kiểm tra lại đường dẫn! \n{e}")
     exit(1)
-
+# data cleaning
 def clean_watch_event(raw):
     return {
         "session_id": raw.get("session_id"),
@@ -60,7 +60,7 @@ def clean_search_event(raw):
         "device_type": raw.get("device_type"),
         "location_country": raw.get("location_country", "Unknown")
     }
-
+# lấy mốc thời gian hiện tại làm mốc tính toán
 base = datetime.now()
 def start_simulator():
     print(f" KAFKA SYSTEM ACTIVE: Đang đẩy dữ liệu liên tục vào Topic [{KAFKA_TOPIC}]...")

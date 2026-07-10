@@ -1,13 +1,64 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_timestamp, date_format, round, when
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+from pyspark.sql.streaming import StreamingQueryListener
+from logging.handlers import RotatingFileHandler
 import logging
 import sys
 import os
 
+# CẤU HÌNH LOGGING: Ghi song song ra Console và File cuốn chiếu trong thư mục dự án
+LOG_DIR = "/opt/spark/logs"
+# os.makedirs(LOG_DIR, exist_ok=True)
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except FileExistsError:
+    # Nếu Docker báo lỗi "File exists" giả lập do cơ chế Mount, bỏ qua một cách an toàn
+    pass
+LOG_FILE_PATH = os.path.join(LOG_DIR, "spark_streaming.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        # Giới hạn dung lượng file log tối đa 20MB, lưu tối đa 5 file backup
+        RotatingFileHandler(LOG_FILE_PATH, maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger("STREAMING_ENGINE")
+
+# Bộ Listener giám sát hiệu năng Streaming tự động
+class QueryMetricsListener(StreamingQueryListener):
+
+    def onQueryStarted(self, event):
+        logger.info("=" * 60)
+        logger.info(f"[STREAM] Query Started")
+        logger.info(f"[STREAM] Query ID: {event.id}")
+        logger.info("=" * 60)
+
+    def onQueryProgress(self, event):
+        p = event.progress
+
+        logger.info(
+            f"""
+================ STREAM METRICS =================
+Batch ID            : {p.batchId}
+Input Rows          : {p.numInputRows}
+Input Rate          : {p.inputRowsPerSecond:.2f} rows/sec
+Processing Rate     : {p.processedRowsPerSecond:.2f} rows/sec
+Trigger Time        : {p.durationMs.get('triggerExecution', 0)} ms
+=================================================
+"""
+        )
+
+    def onQueryTerminated(self, event):
+        logger.info(f"[STREAM TERMINATED] Luồng xử lý dữ liệu đã dừng.")
+
 def main():
     logger.info("============================================================")
-    logger.info("KHỞI TẠO APACHE SPARK STRUCTURED STREAMING ENGINE...")
+    logger.info("KHỞI ĐỘNG APACHE SPARK STRUCTURED STREAMING ENGINE...")
     logger.info("============================================================")
 
     # 1. Khởi tạo Spark Session cấu hình kết nối HDFS
@@ -17,7 +68,9 @@ def main():
         .getOrCreate()
         
     spark.sparkContext.setLogLevel("WARN")
-
+    spark.streams.addListener(
+        QueryMetricsListener()
+    )
     # 2. Định nghĩa Schema tổng hợp để giải mã từ Kafka
     combined_schema = StructType([
         StructField("event_type", StringType(), True),
@@ -44,20 +97,26 @@ def main():
 
     # 🌟 3. NẠP BẢNG TĨNH MOVIES (STATIC DATAFRAME) ĐỂ PHỤC VỤ STREAM-STATIC JOIN
     # Đọc dữ liệu từ thư mục bảng Dim Movies đã chuẩn hóa trên HDFS
-    logger.info("[STATIC DATA] Đang nạp danh mục phim từ HDFS vào bộ nhớ...")
+    logger.info("[DIMENSION] Đang nạp danh mục phim từ HDFS vào bộ nhớ...")
     try:
         static_movies = spark.read.parquet(f"{hdfs_namenode}/user/hadoop/warehouse/dim_movies") \
             .select("movie_id", "duration_minutes")
     except Exception as e:
         logger.exception("STREAMING ENGINE FAILED")
-        # Phương án dự phòng nếu bạn chưa chuyển CSV thành Parquet, đọc thẳng file CSV gốc từ HDFS
+        # đọc thẳng file CSV gốc từ HDFS nếu không thấy file parquet
         static_movies = spark.read.csv(f"{hdfs_namenode}/user/hadoop/movies.csv", header=True, inferSchema=True) \
             .select("movie_id", col("duration_minutes").cast("double"))
 
     # Đưa bảng tĩnh vào cache để tối ưu hóa tốc độ Join ở các batch sau
     static_movies.cache()
-    logger.info("Đang cache dim_movies vào RAM...")
-    logger.info(f"Số lượng bản ghi dim_movies: {static_movies.count()}")
+    logger.info("Đang cache dim_movies...")
+    logger.info(
+        f"[DIMENSION] Đã nạp {static_movies.count()} bộ phim"
+    )
+    # ép kiểu dữ liệu thành chuỗi (String) rồi mới đẩy qua logger.info().
+    def get_show_string(df, n=3):
+        return df._jdf.showString(n, 20, False)
+    
     # 4. Kết nối kafka để hứng luồng dữ liệu thô
     kafka_raw_stream = spark.readStream \
         .format("kafka") \
@@ -69,7 +128,6 @@ def main():
     raw_socket_stream = kafka_raw_stream.selectExpr("CAST(value AS STRING) as value")
 
     # 5. Hàm xử lý gộp từng Micro-Batch
-    # 5. Hàm xử lý gộp từng Micro-Batch (Đã tối ưu hóa hiệu năng & Logic)
     def process_combined_batch(batch_df, batch_id):
         
         # Parse timestamp từ trường gốc trong log
@@ -84,19 +142,28 @@ def main():
         logger.info(
             f"=== [BATCH {batch_id}] ĐANG XỬ LÝ VI-LUỒNG THỜI GIAN THỰC ==="
         )
+
         batch_df.cache() # Cache một lần duy nhất cho toàn bộ luồng xử lý bên dưới
+
+        event_stats = (
+            batch_df
+            .groupBy("event_type")
+            .count()
+            .collect()
+        )
+
+        for row in event_stats:
+            logger.info(
+                f"[BATCH {batch_id}] {row['event_type']} = {row['count']} records"
+            )
 
         # --- PHÂN NHÁNH 1: XỬ LÝ LOG XEM PHIM (WATCH) + STREAM-STATIC JOIN ---
         watch_batch = batch_df.filter(col("event_type") == "watch")
-        watch_count = watch_batch.count()
-        logger.info(
-            f"[BATCH {batch_id}] WATCH RECORDS = {watch_count}"
-        )
 
-        # Thực hiện phép Join trực tiếp (Nếu watch_batch trống, Spark tự động skip rất nhanh mà không lỗi)
+        # Thực hiện phép Join trực tiếp
         watch_joined = watch_batch.join(static_movies, on="movie_id", how="left")
         
-        # 🌟 SỬA LOGIC: Tính toán và ép trần tiến độ xem phim tối đa là 100.0%
+        # Tính toán và ép trần tiến độ xem phim tối đa là 100.0%
         calculated_progress = when(col("duration_minutes") > 0, 
                                    round((col("watch_duration_minutes") / col("duration_minutes")) * 100, 2)) \
                               .otherwise(0.0)
@@ -109,7 +176,7 @@ def main():
             "watch_duration_minutes", "progress_percentage", 
             "action", "quality", "user_rating", "location_country", "date_key"
         )
-
+ 
         # 1. Ghi xuống HDFS (Cold Data)  ###watch_final.write \
         watch_final \
             .repartition(2, col("date_key")) \
@@ -118,6 +185,10 @@ def main():
             .mode("append") \
             .partitionBy("date_key") \
             .save(f"{hdfs_namenode}/user/hadoop/warehouse/fact_watch_history")
+        
+        logger.info(
+            f"[BATCH {batch_id}] Đã ghi dữ liệu WATCH xuống HDFS"
+        )
             
         # 2. Ghi xuống MongoDB (Hot Data)
         watch_final.write \
@@ -127,9 +198,13 @@ def main():
             .option("collection", "fact_watch_history") \
             .mode("append") \
             .save()
+        
+        logger.info(
+            f"[BATCH {batch_id}] Đã ghi dữ liệu WATCH xuống MongoDB"
+        )
             
-        # Dùng .show() để kiểm tra nhanh trên màn hình console thay vì dùng .count()
-        watch_final.show(3, truncate=False)
+        # Ghi dữ liệu mẫu WATCH trực tiếp vào FILE LOG bằng stringify
+        logger.info(f"[BATCH {batch_id}] Mẫu dữ liệu WATCH:\n{get_show_string(watch_final, 3)}")
 
         # --- PHÂN NHÁNH 2: XỬ LÝ LOG TÌM KIẾM (SEARCH) ---
         search_batch = batch_df \
@@ -139,12 +214,7 @@ def main():
                 "clicked_result_position", "search_duration_seconds", 
                 "had_typo", "device_type", "location_country", "date_key"
             )
-        search_count = search_batch.count()
-
-        logger.info(
-            f"[BATCH {batch_id}] SEARCH RECORDS = {search_count}"
-        )
-
+ 
         # 1. Ghi xuống HDFS (Cold Data)
         search_batch\
             .repartition(2, col("date_key")) \
@@ -153,6 +223,10 @@ def main():
             .mode("append") \
             .partitionBy("date_key") \
             .save(f"{hdfs_namenode}/user/hadoop/warehouse/fact_search_logs")
+        
+        logger.info(
+            f"[BATCH {batch_id}] Đã ghi dữ liệu SEARCH xuống HDFS"
+        )
             
         # 2. Ghi xuống MongoDB (Hot Data)
         search_batch.write \
@@ -162,8 +236,13 @@ def main():
             .option("collection", "fact_search_logs") \
             .mode("append") \
             .save()
+        
+        logger.info(
+            f"[BATCH {batch_id}] Đã ghi dữ liệu SEARCH xuống MongoDB"
+        )
             
-        search_batch.show(3, truncate=False)
+        # Ghi dữ liệu mẫu SEARCH trực tiếp vào FILE LOG bằng stringify
+        logger.info(f"[BATCH {batch_id}] Mẫu dữ liệu SEARCH:\n{get_show_string(search_batch, 3)}")
 
         # Giải phóng bộ nhớ RAM sau khi kết thúc Micro-batch
         batch_df.unpersist()
@@ -180,7 +259,7 @@ def main():
 
     spark.conf.set("spark.sql.adaptive.enabled", "false")
     
-    # 7. KÍCH HOẠT LUỒNG STREAM DUY NHẤT ĐỔ VỀ HDFS
+    # 7. KÍCH HOẠT LUỒNG STREAM ĐỔ VỀ HDFS và mongoDB / triggger cho 10s
     logger.info("ĐANG KÍCH HOẠT ĐƯỜNG ỐNG STREAMING ĐỔ VỀ HDFS...")
     query = refined_stream.writeStream \
         .foreachBatch(process_combined_batch) \
@@ -190,16 +269,5 @@ def main():
 
     query.awaitTermination()
 
-os.makedirs("logs", exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler("/opt/logs/spark_streaming.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-logger = logging.getLogger("STREAMING_ENGINE")
 if __name__ == "__main__":
     main()
