@@ -42,7 +42,6 @@ def load_collection_data(collection_name):
             return pd.DataFrame()
         return pd.DataFrame(data)
     except Exception as e:
-        # Không dùng st.error ở đây để tránh lỗi giao diện lan sang các tab khác
         return pd.DataFrame()
 
 # ============================================================
@@ -53,30 +52,29 @@ st.markdown("*Hệ thống phân tích hành vi người dùng bằng Spark MLli
 st.caption("Kiến trúc hệ thống: Kafka ➡️ Spark Structured Streaming ➡️ HDFS ➡️ Spark MLlib ➡️ MongoDB ➡️ Streamlit")
 st.write("---")
 
-# Tải dữ liệu phân cụm ML làm gốc tính toán KPI
+# Nếu chưa chạy ML, gán các chỉ số KPI là "Đang tính toán..."
 df_ml = load_collection_data("ml_user_segments")
 
-if df_ml.empty:
-    st.warning("⚠️ Serving Layer hiện tại chưa có dữ liệu phân cụm `ml_user_segments`. Vui lòng chạy file ML trước.")
-    st.stop()
-
-# Hiển thị 3 chỉ số KPI cốt lõi ở trên cùng Dashboard
-total_users = len(df_ml)
-avg_duration = df_ml["total_duration_minutes"].mean()
-avg_progress = df_ml["avg_progress_percentage"].mean()
-
-kpi1, kpi2, kpi3 = st.columns(3)
-with kpi1:
-    st.metric("👥 Tổng quy mô người dùng", f"{total_users:,} User")
-with kpi2:
-    st.metric("⏱️ Thời lượng xem trung bình", f"{avg_duration:.1f} phút")
-with kpi3:
-    st.metric("📈 Tiến trình xem trung bình", f"{avg_progress:.1f}%")
+if not df_ml.empty:
+    total_users = len(df_ml)
+    avg_duration = df_ml["total_duration_minutes"].mean()
+    avg_progress = df_ml["avg_progress_percentage"].mean()
+    
+    kpi1, kpi2, kpi3 = st.columns(3)
+    with kpi1: st.metric("👥 Tổng quy mô người dùng", f"{total_users:,} User")
+    with kpi2: st.metric("⏱️ Thời lượng xem trung bình", f"{avg_duration:.1f} phút")
+    with kpi3: st.metric("📈 Tiến trình xem trung bình", f"{avg_progress:.1f}%")
+else:
+    # Hiển thị trạng thái chờ nếu chưa có dữ liệu Batch Layer
+    kpi1, kpi2, kpi3 = st.columns(3)
+    with kpi1: st.metric("👥 Tổng quy mô người dùng", "Chờ Batch...")
+    with kpi2: st.metric("⏱️ Thời lượng xem trung bình", "Chờ Batch...")
+    with kpi3: st.metric("📈 Tiến trình xem trung bình", "Chờ Batch...")
 
 st.write("---")
 
 # ============================================================
-# 4. CHIA CÓC TRÚC 3 TAB THEO ĐÚNG BẢN KẾ HOẠCH
+# 4. CHIA CẤU TRÚC 3 TAB
 # ============================================================
 tab1, tab2, tab3 = st.tabs([
     "📺 Tab 1: Real-time Monitor", 
@@ -89,34 +87,57 @@ tab1, tab2, tab3 = st.tabs([
 # ============================================================
 with tab1:
     st.header("⚡ Hệ Thống Giám Sát Luồng Xem Phim Thời Gian Thực")
-    st.markdown("*(Dữ liệu được Spark Streaming liên tục xử lý từ Kafka và đẩy về MongoDB)*")
+    st.markdown("*(Ứng dụng mô hình Lambda: Kết hợp dữ liệu lịch sử và dữ liệu thời gian thực từ Kafka)*")
     
     col_t1_left, col_t1_right = st.columns(2)
     
     with col_t1_left:
         st.subheader("🔥 Top Thể Loại Phim Đang Hot")
-        # Đọc dữ liệu từ collection report_genre_popularity của bạn
+        # Đọc dữ liệu từ collection report_genre_popularity (Phân tích thể loại phim được xem nhiều nhất)
         df_genre = load_collection_data("report_genre_popularity")
-        if not df_genre.empty:
-            # Tự động lấy tên cột đầu tiên và cột số lượng để vẽ
-            cols = df_genre.columns.tolist()
+        df_genre_stream = load_collection_data("report_genre_popularity_stream")
+        
+        # Gộp dữ liệu bằng Pandas để tránh xung đột Overwrite của Spark Streaming
+        df_genre_list = [df_genre, df_genre_stream]
+        df_genre_active = [df for df in df_genre_list if not df.empty]
+        
+        if df_genre_active:
+            # Nối và gộp nhóm tính tổng
+            df_genre_combined = pd.concat(df_genre_active, ignore_index=True)
+            col_name = df_genre_combined.columns[0]  # Thường là 'genre' hoặc 'genre_primary'
+            col_value = df_genre_combined.columns[1] # Thường là 'count' hoặc 'total_views'
+            
+            df_genre_final = df_genre_combined.groupby(col_name)[col_value].sum().reset_index()
+            df_genre_final = df_genre_final.sort_values(by=col_value, ascending=False)
+            
             fig_genre = px.bar(
-                df_genre, x=cols[0], y=cols[1],
-                labels={cols[0]: "Thể loại", cols[1]: "Lượt xem"},
-                color=cols[0], color_discrete_sequence=px.colors.qualitative.Pastel
+                df_genre_final, x=col_name, y=col_value,
+                labels={col_name: "Thể loại", col_value: "Tổng lượt xem (Batch + Stream)"},
+                color=col_name, color_discrete_sequence=px.colors.qualitative.Pastel
             )
             st.plotly_chart(fig_genre, use_container_width=True)
         else:
-            st.info("💡 Chưa có dữ liệu thời gian thực cho thể loại phim.")
+            st.info("Chưa có dữ liệu thể loại phim từ hệ thống.")
 
     with col_t1_right:
         st.subheader("📱 Cơ Cấu Thiết Bị Truy Cập")
-        # Đọc dữ liệu từ collection report_top_devices của bạn
+        # Đọc dữ liệu từ collection report_top_devices (Phân tích thiết bị phổ biến mà người dùng xem phim)
         df_device = load_collection_data("report_top_devices")
-        if not df_device.empty:
-            cols = df_device.columns.tolist()
+        df_device_stream = load_collection_data("report_top_devices_stream")
+        
+        df_device_list = [df_device, df_device_stream]
+        df_device_active = [df for df in df_device_list if not df.empty]
+        
+        if df_device_active:
+            # Nối và gộp nhóm tính tổng
+            df_device_combined = pd.concat(df_device_active, ignore_index=True)
+            col_name = df_device_combined.columns[0]  # Thường là 'device_type'
+            col_value = df_device_combined.columns[1] # Thường là 'count' hoặc 'total_views'
+            
+            df_device_final = df_device_combined.groupby(col_name)[col_value].sum().reset_index()
+            
             fig_device = px.pie(
-                df_device, names=cols[0], values=cols[1],
+                df_device_final, names=col_name, values=col_value,
                 hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3
             )
             st.plotly_chart(fig_device, use_container_width=True)
@@ -169,36 +190,39 @@ with tab3:
     st.header("🧠 Chiến Lược Phân Khúc Người Dùng Bằng AI (Spark MLlib)")
     st.markdown("*(Mô hình K-Means tự động nhận diện thói quen hành vi để tối ưu hóa chiến dịch Marketing)*")
     
-    # Chia làm 2 cột cho Pie Chart và Scatter Plot giống như thiết kế cũ của bạn
-    left_col, right_col = st.columns([1, 1])
+    if df_ml.empty:
+        st.warning("⚠️ Tab này yêu cầu dữ liệu từ Batch Layer.")
+    else:
+    # Chia làm 2 cột cho Pie Chart và Scatter Plot
+        left_col, right_col = st.columns([1, 1])
     
-    with left_col:
-        st.subheader("📊 Tỷ Trọng Phân Bổ Các Nhóm")
-        segment_counts = df_ml["segment_name"].value_counts().reset_index()
-        segment_counts.columns = ["Phân khúc", "Số lượng"]
+        with left_col:
+            st.subheader("📊 Tỷ Trọng Phân Bổ Các Nhóm")
+            segment_counts = df_ml["segment_name"].value_counts().reset_index()
+            segment_counts.columns = ["Phân khúc", "Số lượng"]
         
-        fig_pie = px.pie(
-            segment_counts, values="Số lượng", names="Phân khúc",
-            hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
-        )
-        fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig_pie, use_container_width=True)
+            fig_pie = px.pie(
+                segment_counts, values="Số lượng", names="Phân khúc",
+                hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
+            )
+            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig_pie, use_container_width=True)
         
-    with right_col:
-        st.subheader("🌙 Biểu Đồ Phân Cụm Hành Vi Thực Tế")
-        fig_scatter = px.scatter(
-            df_ml, x="total_duration_minutes", y="night_view_ratio",
-            size="total_views", color="segment_name", hover_data=["user_id"],
-            opacity=0.75,
-            labels={
-                "total_duration_minutes": "Tổng số phút xem",
-                "night_view_ratio": "Tỷ lệ xem ban đêm",
-                "segment_name": "Phân khúc"
-            }
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        with right_col:
+            st.subheader("🌙 Biểu Đồ Phân Cụm Hành Vi Thực Tế")
+            fig_scatter = px.scatter(
+                df_ml, x="total_duration_minutes", y="night_view_ratio",
+                size="total_views", color="segment_name", hover_data=["user_id"],
+                opacity=0.75,
+                labels={
+                    "total_duration_minutes": "Tổng số phút xem",
+                    "night_view_ratio": "Tỷ lệ xem ban đêm",
+                    "segment_name": "Phân khúc"
+                }
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
         
-    st.write("---")
+        st.write("---")
     
     # Hiển thị bảng số liệu Profile chi tiết của các tâm cụm
     st.subheader("🔍 Chi Tiết Đặc Trưng Chỉ Số Của Từng Cụm")

@@ -100,12 +100,12 @@ def main():
     logger.info("[DIMENSION] Đang nạp danh mục phim từ HDFS vào bộ nhớ...")
     try:
         static_movies = spark.read.parquet(f"{hdfs_namenode}/user/hadoop/warehouse/dim_movies") \
-            .select("movie_id", "duration_minutes")
+            .select("movie_id", "duration_minutes", "genre_primary")
     except Exception as e:
         logger.exception("STREAMING ENGINE FAILED")
-        # đọc thẳng file CSV gốc từ HDFS nếu không thấy file parquet
+        # đọc file CSV gốc từ HDFS nếu không thấy file parquet
         static_movies = spark.read.csv(f"{hdfs_namenode}/user/hadoop/movies.csv", header=True, inferSchema=True) \
-            .select("movie_id", col("duration_minutes").cast("double"))
+            .select("movie_id", col("duration_minutes").cast("double"), "genre_primary")
 
     # Đưa bảng tĩnh vào cache để tối ưu hóa tốc độ Join ở các batch sau
     static_movies.cache()
@@ -260,14 +260,48 @@ def main():
     spark.conf.set("spark.sql.adaptive.enabled", "false")
     
     # 7. KÍCH HOẠT LUỒNG STREAM ĐỔ VỀ HDFS và mongoDB / triggger cho 10s
-    logger.info("ĐANG KÍCH HOẠT ĐƯỜNG ỐNG STREAMING ĐỔ VỀ HDFS...")
-    query = refined_stream.writeStream \
+    logger.info("ĐANG KÍCH HOẠT ĐƯỜNG ỐNG STREAMING ĐỔ VỀ STORAGE LAYER...")
+    # LUỒNG 1: Ghi Log thô/đã làm sạch xuống HDFS và MongoDB
+    query_main = refined_stream.writeStream \
         .foreachBatch(process_combined_batch) \
         .option("checkpointLocation", f"{hdfs_namenode}/user/hadoop/checkpoints/combined_stream") \
         .trigger(processingTime="10 seconds") \
         .start()
+    
+    # Lọc riêng luồng xem phim (watch) để làm các bài toán thống kê thời gian thực
+    watch_stream = refined_stream.filter(col("event_type") == "watch")
 
-    query.awaitTermination()
+    # LUỒNG 2: Tính toán Hot Data cho Thể loại phim (Join)
+    genre_joined_stream = watch_stream.join(static_movies, on="movie_id", how="left")
+
+    # Tính toán Hot Data cho thể loại phim trực tiếp từ luồng sự kiện
+    genre_counts = genre_joined_stream.groupBy("genre_primary").count()
+
+    query_genre = genre_counts.writeStream \
+        .format("mongodb") \
+        .outputMode("complete") \
+        .option("connection.uri", "mongodb://admin:secret@mongodb:27017") \
+        .option("database", "streaming_analytics") \
+        .option("collection", "report_genre_popularity_stream") \
+        .option("checkpointLocation", f"{hdfs_namenode}/user/hadoop/checkpoints/genre_hot") \
+        .trigger(processingTime="10 seconds") \
+        .start()
+    
+    # LUỒNG 3: Tính toán Hot Data cho Cơ cấu Thiết bị
+    device_counts = watch_stream.groupBy("device_type").count()
+
+    query_device = device_counts.writeStream \
+        .format("mongodb") \
+        .outputMode("complete") \
+        .option("connection.uri", "mongodb://admin:secret@mongodb:27017") \
+        .option("database", "streaming_analytics") \
+        .option("collection", "report_top_devices_stream") \
+        .option("checkpointLocation", f"{hdfs_namenode}/user/hadoop/checkpoints/device_hot") \
+        .trigger(processingTime="10 seconds") \
+        .start()
+
+    # Giữ cá luồng chạy song song không bị ngắt quãng
+    spark.streams.awaitAnyTermination()
 
 if __name__ == "__main__":
     main()
