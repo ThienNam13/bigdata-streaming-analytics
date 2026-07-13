@@ -1,24 +1,18 @@
-Dưới đây là toàn bộ nội dung file `README.md` đã được dịch sang tiếng Việt một cách chuẩn xác, giữ nguyên các thuật ngữ kỹ thuật chuyên ngành mà giới Data Engineer Việt Nam thường dùng để đảm bảo tính chuyên nghiệp khi bạn push lên GitHub.
-
-Bạn chỉ cần copy đoạn code bên dưới và paste vào file `README.md` của mình:
-
----
-
+User Behavior Analytics for Video Streaming Platform (Hệ thống phân tích hành vi người dùng trên nền tảng phát video trực tuyến)
 ```markdown
-# User Behavior Analytics for Video Streaming Platform (Hệ thống phân tích hành vi người dùng trên nền tảng phát video trực tuyến)
 
 Một đường ống (pipeline) phân tích dữ liệu lớn toàn diện (end-to-end) áp dụng **Kiến trúc Hybrid Lambda** để thu nạp, xử lý, lưu trữ và phân tích hàng triệu sự kiện tương tác theo thời gian thực của người dùng (luồng nhấp chuột - clickstream, hành vi phát video, nhật ký tìm kiếm) trên một nền tảng giả lập tương tự như Netflix.
 
 ---
 
-## 🏗️ Kiến trúc hệ thống
+🏗️ Kiến trúc hệ thống
 
 Hệ thống được thiết kế dựa trên mô hình **Kiến trúc Lambda**, giúp phân tách độc lập giữa việc xử lý luồng dữ liệu thời gian thực độ trễ thấp và việc phân tích chuyên sâu dữ liệu lịch sử theo mẻ (batch).
 
 *   **Tầng Tốc độ - Speed Layer (Dữ liệu nóng - Hot Data):** Đường ống xử lý độ trễ thấp sử dụng **Spark Structured Streaming** (Chu kỳ Micro-batch 10 giây) để liên tục kéo dữ liệu từ **Apache Kafka**, sau đó đẩy lập tức sang **MongoDB** nhằm cập nhật tức thì cho các biểu đồ trên Dashboard real-time.
 *   **Tầng Xử lý theo mẻ - Batch Layer (Dữ liệu lạnh - Cold Data):** Đường ống lưu trữ an toàn, ghi toàn bộ sự kiện thô xuống kho dữ liệu phân tán **Hadoop HDFS** dưới định dạng tệp **Parquet** nén, được tối ưu hóa cho các tác vụ tính toán mẻ hạng nặng thông qua **Spark SQL** và **Spark MLlib**.
 
-### Đường ống dữ liệu doanh nghiệp 7 tầng (The 7-Layer Enterprise Data Pipeline)
+Đường ống dữ liệu doanh nghiệp 7 tầng (The 7-Layer Enterprise Data Pipeline)
 1.  **Data Source (Tầng nguồn):** Giả lập tương tác của người dùng Netflix (Sử dụng tập dữ liệu Kaggle Dataset với hơn 210.000 bản ghi).
 2.  **Access Layer (Tầng truy cập):** Script Python giả lập luồng bắn sự kiện chạy liên tục với tần suất 20 sự kiện/giây nhằm tạo áp lực tải thực tế cho hệ thống.
 3.  **Data Ingestion Layer (Tầng thu nạp):** Cụm Apache Kafka Cluster vận hành qua cơ chế **KRaft** (Kiến trúc thế hệ mới không cần ZooKeeper).
@@ -29,7 +23,7 @@ Hệ thống được thiết kế dựa trên mô hình **Kiến trúc Lambda**
 
 ---
 
-## 🛠️ Ma trận công nghệ ứng dụng (Tech Stack)
+Ma trận công nghệ ứng dụng (Tech Stack)
 
 | Thành phần | Công nghệ | Vai trò trong hạ tầng |
 | :--- | :--- | :--- |
@@ -44,7 +38,7 @@ Hệ thống được thiết kế dựa trên mô hình **Kiến trúc Lambda**
 
 ---
 
-## 📂 Cấu trúc thư mục mã nguồn
+Cấu trúc thư mục mã nguồn
 
 ```directory
 ├── docker-compose.yml             # Bản thiết kế hạ tầng mã hóa (Định nghĩa 9 containers phân tán)
