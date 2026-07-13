@@ -51,6 +51,7 @@ Cấu trúc thư mục mã nguồn
 └── data/                          # Thư mục chứa các tệp CSV nguồn từ Kaggle (users, movies, logs)
 
 ```
+<img width="1484" height="1671" alt="Architecture_Streaming drawio" src="https://github.com/user-attachments/assets/d3c2ce72-7007-4486-a767-bd490f5c8ac0" />
 
 ---
 
@@ -60,6 +61,7 @@ Dữ liệu lịch sử lưu trữ trên HDFS được cấu trúc lại thành 
 
 * **Các bảng chiều (Dimension Tables):** `dim_users` (Thông tin nền người dùng / gói cước dịch vụ), `dim_movies` (Danh mục phim / điểm số IMDb).
 * **Các bảng sự kiện (Fact Tables):** `fact_watch_history` (Nhật ký xem phim chi tiết, tiến độ xem %), `fact_search_logs` (Hành vi từ khóa tìm kiếm, nhãn gõ sai chính tả).
+<img width="937" height="759" alt="image" src="https://github.com/user-attachments/assets/460577f0-e562-4f4c-93ec-ab658a3b6670" />
 
 ---
 
