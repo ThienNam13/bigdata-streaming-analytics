@@ -1,7 +1,7 @@
 User Behavior Analytics for Video Streaming Platform (Hệ thống phân tích hành vi người dùng trên nền tảng phát video trực tuyến)
 ```markdown
 
-Một đường ống (pipeline) phân tích dữ liệu lớn toàn diện (end-to-end) áp dụng **Kiến trúc Hybrid Lambda** để thu nạp, xử lý, lưu trữ và phân tích hàng triệu sự kiện tương tác theo thời gian thực của người dùng (luồng nhấp chuột - clickstream, hành vi phát video, nhật ký tìm kiếm) trên một nền tảng giả lập tương tự như Netflix.
+Một đường ống (pipeline) phân tích dữ liệu lớn toàn diện (end-to-end) áp dụng **Kiến trúc Hybrid Lambda** để thu nạp, xử lý, lưu trữ và phân tích hàng triệu sự kiện tương tác theo thời gian thực của người dùng (luồng nhấp chuột - clickstream, hành vi phát video, nhật ký tìm kiếm) trên một nền tảng giả lập tương tự như Netflix. (Dữ liệu nguồn được lấy từ: https://www.kaggle.com/datasets/sayeeduddin/netflix-2025user-behavior-dataset-210k-records/data?select=README.md)
 
 ---
 
@@ -59,7 +59,7 @@ Cấu trúc thư mục mã nguồn
 
 Dữ liệu lịch sử lưu trữ trên HDFS được cấu trúc lại thành một Kho dữ liệu (Data Warehouse) tối ưu theo mô hình **Sơ đồ hình sao (Star Schema)** nhằm tăng tốc tối đa cho các câu lệnh truy vấn `JOIN` phân tán:
 
-* **Các bảng chiều (Dimension Tables):** `dim_users` (Thông tin nền người dùng / gói cước dịch vụ), `dim_movies` (Danh mục phim / điểm số IMDb).
+* **Các bảng chiều (Dimension Tables):** `dim_users` (Thông tin nền người dùng / gói cước dịch vụ), `dim_movies` (Danh mục phim / điểm số IMDb). `dim_date` (Thời gian phân tích - Bảng này do Spark tự sinh ra bằng cách bóc tách cột watch_date và search_date để phục vụ các bài toán phân tích theo chu kỳ thời gian).
 * **Các bảng sự kiện (Fact Tables):** `fact_watch_history` (Nhật ký xem phim chi tiết, tiến độ xem %), `fact_search_logs` (Hành vi từ khóa tìm kiếm, nhãn gõ sai chính tả).
 <img width="937" height="759" alt="image" src="https://github.com/user-attachments/assets/460577f0-e562-4f4c-93ec-ab658a3b6670" />
 
